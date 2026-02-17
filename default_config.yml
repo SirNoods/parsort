@@ -1,5 +1,4 @@
-para_root: ~
-inbox_default: ~/Downloads
+para_root: "~"
 
 buckets:
   projects: 1_Projects
@@ -7,15 +6,18 @@ buckets:
   resources: 3_Resources
   archive: 4_Archive
 
-transactions_dir: ~/.local/state/parsort/transactions
-
 rules:
-  - name: Images to Resources/Images
-    match:
-      extension: [png, jpg, jpeg, gif, webp]
-    move_to: Resources/Images
+  - name: Images
+    ext: [png, jpg, jpeg, gif, webp]
+    bucket: resources
+    path: Images
 
-  - name: PDFs to Resources/Documents
-    match:
-      - extension: [pdf]
-      move_to: Projects/Documents
+  - name: Archives
+    ext: [zip, rar, 7z, tar, gz]
+    bucket: archive
+    path: archives
+
+  - name: PDFs
+    ext: [pdf]
+    bucket: resources
+    path: PDFs
