@@ -107,6 +107,26 @@ def cmd_init(args: argparse.Namespace) -> int:
         "archive": prompt("Archive bucket folder", "4_Archive"),
     }
 
+    # --- NEW: Validate bucket directories ---
+    missing = []
+    for key, folder_name in buckets.items():
+        bucket_path = para_root / folder_name
+        if not bucket_path.exists():
+            missing.append(bucket_path)
+
+    if missing:
+        print("\nThe following bucket directories do not exist:")
+        for path in missing:
+            print(f"  - {path}")
+
+        create = input("\nCreate them now? [y/N]: ").strip().lower()
+        if create == "y":
+            for path in missing:
+                path.mkdir(parents=True, exist_ok=True)
+                print(f"Created: {path}")
+        else:
+            print("Skipping bucket creation. Make sure they exist before sorting.")
+
     cfg_path.write_text(config_template(para_root, buckets), encoding="utf-8")
     print(f"\nWrote config: {cfg_path}")
     return 0
