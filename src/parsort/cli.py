@@ -3,7 +3,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 from .config import load_config
-from .log import log_path_for_inbox, write_record
+from .log import run_log_path, set_latest_run, write_record
 from .sorter import SkipRecord, sort_inbox
 from .undo import undo_last_run
 from .xdg import user_config_path
@@ -150,11 +150,13 @@ def cmd_sort(args: argparse.Namespace) -> int:
         print_unmatched(skipped)
         return 0
 
-    log_path = log_path_for_inbox(inbox)
+    log_path = run_log_path(inbox)
     with log_path.open("w", encoding="utf-8") as fp:
         for m in moves:
             write_record(fp, m)
             print(f"{m.rule}: {m.src} -> {m.dst}")
+
+    set_latest_run(inbox, log_path)
 
     print(f"moved {len(moves)} file(s)")
     print_unmatched(skipped)
