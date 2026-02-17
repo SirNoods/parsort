@@ -7,6 +7,16 @@ import yaml
 import sys
 
 
+"""
+Configuration loading and validation for Parsort.
+
+Responsibilities:
+- Define Rule and Config data models
+- Load YAML config from disk
+- Normalize and validate rule definitions
+- Warn (non-fatally) about invalid rule entries
+"""
+
 @dataclass(frozen=True)
 class Rule:
     name: str

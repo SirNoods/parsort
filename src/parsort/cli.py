@@ -1,16 +1,43 @@
+"""
+parsort.cli
+
+Command-line interface for parsort: a human-friendly CLI file sorter built around PARA.
+
+Responsibilities:
+- Parse CLI arguments and dispatch subcommands.
+- Create (guided or default) configuration files.
+- Run sorting in either:
+  - automatic mode (rule-based)
+  - guided mode (prompt for every file; rules become suggestions only)
+- Record moves into a per-run log and update "latest run" pointer.
+- Undo the last run.
+"""
+
 from __future__ import annotations
+
 import argparse
+import shutil
 from collections import Counter
 from pathlib import Path
+
 from .config import load_config
 from .log import run_log_path, set_latest_run, write_record, MoveRecord
 from .sorter import SkipRecord, sort_inbox, pick_rule, unique_destination
 from .undo import undo_last_run
 from .xdg import user_config_path
-import shutil
 
+# ---------------------------------------------------------------------------
+# Config templates
+# ---------------------------------------------------------------------------
 def config_template(para_root: Path, buckets: dict[str, str]) -> str:
+    """
+    Render a minimal YAML config template.
+
+    Note:
+      This produces a YAML string (not a Python object) because cmd_init writes it to disk.
+    """
     return f"""\
+    
 para_root: "{para_root}"
 
 buckets:
@@ -37,6 +64,7 @@ rules:
 """
 
 def default_config_template() -> str:
+    """Default config: PARA root = home, bucket folders = 1_Projects/2_Areas/3_Resources/4_Archive."""
     home = Path.home()
     buckets = {
         "projects": "1_Projects",
@@ -46,11 +74,24 @@ def default_config_template() -> str:
     }
     return config_template(home, buckets)
 
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
 def prompt(question: str, default: str) -> str:
+    """Prompt for input with a default value."""
     ans = input(f"{question} [{default}]: ").strip()
     return ans or default
 
 def resolve_config_path(arg: str | None) -> Path:
+    """
+    Decide which config file to use.
+
+    Priority:
+      1) --config value (if provided)
+      2) user config path (~/.config/parsort/config.yml)
+      3) fallback: ./default_config.yml (project-local)
+    """
     if arg:
         return Path(arg).expanduser().resolve()
 
@@ -61,21 +102,35 @@ def resolve_config_path(arg: str | None) -> Path:
     # fallback: project-local default_config.yml
     return Path("default_config.yml").resolve()
 
-def suggested_destination(cfg, file: Path) -> tuple[str, str] | None:
-    rule = pick_rule(cfg, file)
-    if not rule:
-        return None
-    return (rule.bucket, rule.path)
-
 def bucket_menu_order(cfg) -> list[str]:
-    # Prefer standard PARA order if present; otherwise fall back to config order
+    """
+    Choose bucket menu order.
+
+    Prefer the canonical PARA order if those keys exist; otherwise keep config order.
+    """
     preferred = ["projects", "areas", "resources", "archive"]
     keys = list(cfg.buckets.keys())
     ordered = [k for k in preferred if k in cfg.buckets]
     ordered += [k for k in keys if k not in ordered]
     return ordered
 
+def suggested_destination(cfg, file: Path) -> tuple[str, str] | None:
+    """
+    Return (bucket_key, subpath) suggestion for a file using rules.
+
+    This is a *hint* for guided mode; automatic mode is handled in sorter.sort_inbox.
+    """
+    rule = pick_rule(cfg, file)
+    if not rule:
+        return None
+    return (rule.bucket, rule.path)
+
 def print_unmatched(skipped: list[SkipRecord], limit: int = 20) -> None:
+    """
+    Print a summary of skipped/unmatched records.
+
+    Useful after both automatic and guided runs so users can see what didn't move.
+    """
     if not skipped:
         return
 
@@ -93,18 +148,25 @@ def print_unmatched(skipped: list[SkipRecord], limit: int = 20) -> None:
     if total > limit:
         print(f"  ... and {total - limit} more")
 
+# ---------------------------------------------------------------------------
+# Guided folder picker (interactive navigation)
+# ---------------------------------------------------------------------------
+
 def pick_folder_interactive(start_dir: Path) -> Path | None:
     """
     Interactive folder picker.
-    - Enter: accept current folder
-    - number: descend into that subfolder
-    - b: go back up one level (if possible)
-    - s: skip file
-    - q: quit run
+
+    Controls:
+      - Enter: choose current folder
+      - number: descend into that subfolder
+      - b: go back up one level
+      - s: skip this file (return None)
+      - q: quit entire run (raise StopIteration)
+
     Returns:
-      Path (chosen folder) OR
-      None (skip) OR
-      raises StopIteration (quit)
+      Path: chosen folder
+      None: user skipped this file
+      raises StopIteration: user quit run
     """
     current = start_dir.resolve()
 
@@ -114,7 +176,7 @@ def pick_folder_interactive(start_dir: Path) -> Path | None:
         try:
             subdirs = sorted([p for p in current.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
         except PermissionError:
-            print("⚠️  Permission denied listing this directory.")
+            print("Permission denied listing this directory.")
             subdirs = []
 
         if subdirs:
@@ -152,7 +214,18 @@ def pick_folder_interactive(start_dir: Path) -> Path | None:
 
         print("Invalid input. Use Enter, a number, b, s, or q.")
 
+# ---------------------------------------------------------------------------
+# Subcommand: init
+# ---------------------------------------------------------------------------
+
 def cmd_init(args: argparse.Namespace) -> int:
+    """
+    Create the user config at ~/.config/parsort/config.yml.
+
+    Modes:
+      - default: write a basic config template
+      - guided: ask for PARA root + bucket folder names, optionally create missing dirs
+    """
     cfg_path = user_config_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -166,9 +239,8 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"Wrote config: {cfg_path}")
         return 0
 
-    # Guided mode
+    # Guided setup -----------------------------------------------------------
     print("Parsort init (guided). Press Enter to accept defaults.\n")
-
     para_root_str = prompt("PARA root folder", str(Path.home()))
     para_root = Path(para_root_str).expanduser().resolve()
 
@@ -179,6 +251,7 @@ def cmd_init(args: argparse.Namespace) -> int:
         "archive": prompt("Archive bucket folder", "4_Archive"),
     }
 
+    # Offer to create bucket directories if they're missing.
     missing = []
     for key, folder_name in buckets.items():
         bucket_path = para_root / folder_name
@@ -203,13 +276,20 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 def cmd_sort(args: argparse.Namespace) -> int:
+    """
+    Sort files from inbox into PARA structure.
+
+    Modes:
+    - Automatic: apply rules
+    - Guided: prompt for every file (rules are suggestions only)
+    """
     inbox = Path(args.inbox).expanduser().resolve()
     cfg_path = resolve_config_path(args.config)
 
     cfg = load_config(cfg_path)
 
     # -------------------------
-    # Guided mode: prompt for EVERY file
+    # Guided mode
     # -------------------------
     if getattr(args, "guided", False):
         files = sorted([p for p in inbox.iterdir() if p.is_file()])
@@ -304,7 +384,7 @@ def cmd_sort(args: argparse.Namespace) -> int:
             rule_name = rule.name if rule else "guided"
             confirmed.append(MoveRecord(src=str(f), dst=str(dst), rule=rule_name))
 
-        # Guided dry-run output
+        # Dry-run handling
         if args.dry_run:
             for m in confirmed:
                 print(f"[DRY] {m.rule}: {m.src} -> {m.dst}")
@@ -423,8 +503,14 @@ def guided_plan_for_file(cfg, inbox: Path, file: Path) -> tuple[str, str] | None
 
     return (str(dst), rule_name)
 
+# ---------------------------------------------------------------------------
+# undo command
+# ---------------------------------------------------------------------------
 
 def cmd_undo(args: argparse.Namespace) -> int:
+    """
+    Undo the last sort run for a given inbox.
+    """
     inbox = Path(args.inbox).expanduser().resolve()
     n = undo_last_run(inbox=inbox, dry_run=args.dry_run)
     if args.dry_run:
@@ -433,8 +519,14 @@ def cmd_undo(args: argparse.Namespace) -> int:
         print(f"undid {n} move(s)")
     return 0
 
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Construct top-level argument parser and subcommands.
+    """
     p = argparse.ArgumentParser(prog="parsort")
     sub = p.add_subparsers(dest="cmd", required=True)
 
