@@ -93,6 +93,64 @@ def print_unmatched(skipped: list[SkipRecord], limit: int = 20) -> None:
     if total > limit:
         print(f"  ... and {total - limit} more")
 
+def pick_folder_interactive(start_dir: Path) -> Path | None:
+    """
+    Interactive folder picker.
+    - Enter: accept current folder
+    - number: descend into that subfolder
+    - b: go back up one level (if possible)
+    - s: skip file
+    - q: quit run
+    Returns:
+      Path (chosen folder) OR
+      None (skip) OR
+      raises StopIteration (quit)
+    """
+    current = start_dir.resolve()
+
+    while True:
+        print("\n" + "-" * 50)
+        print(f"Current: {current}")
+        try:
+            subdirs = sorted([p for p in current.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+        except PermissionError:
+            print("⚠️  Permission denied listing this directory.")
+            subdirs = []
+
+        if subdirs:
+            for i, d in enumerate(subdirs, start=1):
+                print(f"  {i}) {d.name}/")
+        else:
+            print("  (no subfolders)")
+
+        print("\nEnter = choose this folder")
+        print("b = back, s = skip, q = quit")
+
+        choice = input("> ").strip().lower()
+
+        if choice == "":
+            return current
+
+        if choice == "s":
+            return None
+
+        if choice == "q":
+            raise StopIteration
+
+        if choice == "b":
+            parent = current.parent
+            # prevent going above filesystem root; allow backing up freely otherwise
+            if parent != current:
+                current = parent
+            continue
+
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(subdirs):
+                current = subdirs[idx - 1]
+                continue
+
+        print("Invalid input. Use Enter, a number, b, s, or q.")
 
 def cmd_init(args: argparse.Namespace) -> int:
     cfg_path = user_config_path()
@@ -158,11 +216,12 @@ def cmd_sort(args: argparse.Namespace) -> int:
         confirmed: list[MoveRecord] = []
         skipped: list[SkipRecord] = []
 
-        # Prefer PARA order if present
         preferred = ["projects", "areas", "resources", "archive"]
         bucket_keys = [k for k in preferred if k in cfg.buckets] + [
             k for k in cfg.buckets.keys() if k not in preferred
         ]
+
+        quit_all = False
 
         for f in files:
             rule = pick_rule(cfg, f)  # suggestion only
@@ -181,20 +240,18 @@ def cmd_sort(args: argparse.Namespace) -> int:
 
             for i, k in enumerate(bucket_keys, start=1):
                 print(f"  {i}) {k} ({cfg.buckets[k]})")
-            print("  s) skip")
-            print("  q) quit")
+            print("  s) skip file")
+            print("  q) quit run")
+            print("  Enter = accept suggested bucket (if any)")
 
-            # Choose bucket
             chosen_bucket: str | None = None
-            subpath_default = ""
 
             while True:
                 choice = input("> ").strip().lower()
 
                 if choice == "q":
                     print("Quit.")
-                    # stop prompting further files
-                    f = None  # marker for quit
+                    quit_all = True
                     break
 
                 if choice == "s":
@@ -206,41 +263,45 @@ def cmd_sort(args: argparse.Namespace) -> int:
                         print("No suggestion available. Choose a bucket number, s, or q.")
                         continue
                     chosen_bucket = suggested_bucket
-                    subpath_default = suggested_path
                     break
 
                 if choice.isdigit():
                     idx = int(choice)
                     if 1 <= idx <= len(bucket_keys):
                         chosen_bucket = bucket_keys[idx - 1]
-                        subpath_default = suggested_path if chosen_bucket == suggested_bucket else ""
                         break
 
                 print("Invalid input. Use Enter, 1-9, s, or q.")
 
-            # quit marker
-            if f is None:
+            if quit_all:
                 break
 
-            # skip marker
             if chosen_bucket is None:
-                continue
-
-            # Choose subfolder path (can be empty)
-            subpath = input(f"Subfolder path [{subpath_default}]: ").strip() or subpath_default
+                continue  # skipped
 
             bucket_dir = cfg.buckets[chosen_bucket]
-            if subpath:
-                dest_dir = (cfg.para_root / bucket_dir / subpath).resolve()
-            else:
-                dest_dir = (cfg.para_root / bucket_dir).resolve()
-            dest_dir.mkdir(parents=True, exist_ok=True)
+            bucket_root = (cfg.para_root / bucket_dir).resolve()
+            bucket_root.mkdir(parents=True, exist_ok=True)
 
-            dst = unique_destination(dest_dir / f.name)
+            # Start browsing inside suggested folder if possible
+            start_dir = bucket_root
+            if rule and chosen_bucket == rule.bucket and rule.path:
+                suggested_dir = (bucket_root / rule.path).resolve()
+                if suggested_dir.exists() and suggested_dir.is_dir():
+                    start_dir = suggested_dir
 
-            # For now, log the original rule name if it existed; otherwise "guided"
+            try:
+                chosen_dir = pick_folder_interactive(start_dir)
+            except StopIteration:
+                print("Quit.")
+                break
+
+            if chosen_dir is None:
+                skipped.append(SkipRecord(path=str(f), reason="user skipped"))
+                continue
+
+            dst = unique_destination(chosen_dir / f.name)
             rule_name = rule.name if rule else "guided"
-
             confirmed.append(MoveRecord(src=str(f), dst=str(dst), rule=rule_name))
 
         # Guided dry-run output
