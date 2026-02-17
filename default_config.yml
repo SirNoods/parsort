@@ -1,0 +1,21 @@
+para_root: ~
+inbox_default: ~/Downloads
+
+buckets:
+  projects: 1_Projects
+  areas: 2_Areas
+  resources: 3_Resources
+  archive: 4_Archive
+
+transactions_dir: ~/.local/state/parsort/transactions
+
+rules:
+  - name: Images to Resources/Images
+    match:
+      extension: [png, jpg, jpeg, gif, webp]
+    move_to: Resources/Images
+
+  - name: PDFs to Resources/Documents
+    match:
+      - extension: [pdf]
+      move_to: Projects/Documents
