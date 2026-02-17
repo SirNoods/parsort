@@ -3,10 +3,11 @@ import argparse
 from collections import Counter
 from pathlib import Path
 from .config import load_config
-from .log import run_log_path, set_latest_run, write_record
-from .sorter import SkipRecord, sort_inbox
+from .log import run_log_path, set_latest_run, write_record, MoveRecord
+from .sorter import SkipRecord, sort_inbox, pick_rule, unique_destination
 from .undo import undo_last_run
 from .xdg import user_config_path
+import shutil
 
 def config_template(para_root: Path, buckets: dict[str, str]) -> str:
     return f"""\
@@ -60,6 +61,19 @@ def resolve_config_path(arg: str | None) -> Path:
     # fallback: project-local default_config.yml
     return Path("default_config.yml").resolve()
 
+def suggested_destination(cfg, file: Path) -> tuple[str, str] | None:
+    rule = pick_rule(cfg, file)
+    if not rule:
+        return None
+    return (rule.bucket, rule.path)
+
+def bucket_menu_order(cfg) -> list[str]:
+    # Prefer standard PARA order if present; otherwise fall back to config order
+    preferred = ["projects", "areas", "resources", "archive"]
+    keys = list(cfg.buckets.keys())
+    ordered = [k for k in preferred if k in cfg.buckets]
+    ordered += [k for k in keys if k not in ordered]
+    return ordered
 
 def print_unmatched(skipped: list[SkipRecord], limit: int = 20) -> None:
     if not skipped:
@@ -79,6 +93,64 @@ def print_unmatched(skipped: list[SkipRecord], limit: int = 20) -> None:
     if total > limit:
         print(f"  ... and {total - limit} more")
 
+def pick_folder_interactive(start_dir: Path) -> Path | None:
+    """
+    Interactive folder picker.
+    - Enter: accept current folder
+    - number: descend into that subfolder
+    - b: go back up one level (if possible)
+    - s: skip file
+    - q: quit run
+    Returns:
+      Path (chosen folder) OR
+      None (skip) OR
+      raises StopIteration (quit)
+    """
+    current = start_dir.resolve()
+
+    while True:
+        print("\n" + "-" * 50)
+        print(f"Current: {current}")
+        try:
+            subdirs = sorted([p for p in current.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+        except PermissionError:
+            print("⚠️  Permission denied listing this directory.")
+            subdirs = []
+
+        if subdirs:
+            for i, d in enumerate(subdirs, start=1):
+                print(f"  {i}) {d.name}/")
+        else:
+            print("  (no subfolders)")
+
+        print("\nEnter = choose this folder")
+        print("b = back, s = skip, q = quit")
+
+        choice = input("> ").strip().lower()
+
+        if choice == "":
+            return current
+
+        if choice == "s":
+            return None
+
+        if choice == "q":
+            raise StopIteration
+
+        if choice == "b":
+            parent = current.parent
+            # prevent going above filesystem root; allow backing up freely otherwise
+            if parent != current:
+                current = parent
+            continue
+
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(subdirs):
+                current = subdirs[idx - 1]
+                continue
+
+        print("Invalid input. Use Enter, a number, b, s, or q.")
 
 def cmd_init(args: argparse.Namespace) -> int:
     cfg_path = user_config_path()
@@ -107,7 +179,6 @@ def cmd_init(args: argparse.Namespace) -> int:
         "archive": prompt("Archive bucket folder", "4_Archive"),
     }
 
-    # --- NEW: Validate bucket directories ---
     missing = []
     for key, folder_name in buckets.items():
         bucket_path = para_root / folder_name
@@ -136,6 +207,133 @@ def cmd_sort(args: argparse.Namespace) -> int:
     cfg_path = resolve_config_path(args.config)
 
     cfg = load_config(cfg_path)
+
+    # -------------------------
+    # Guided mode: prompt for EVERY file
+    # -------------------------
+    if getattr(args, "guided", False):
+        files = sorted([p for p in inbox.iterdir() if p.is_file()])
+        confirmed: list[MoveRecord] = []
+        skipped: list[SkipRecord] = []
+
+        preferred = ["projects", "areas", "resources", "archive"]
+        bucket_keys = [k for k in preferred if k in cfg.buckets] + [
+            k for k in cfg.buckets.keys() if k not in preferred
+        ]
+
+        quit_all = False
+
+        for f in files:
+            rule = pick_rule(cfg, f)  # suggestion only
+            suggested_bucket = rule.bucket if rule else None
+            suggested_path = rule.path if rule else ""
+            suggested_label = (
+                f"{suggested_bucket}/{suggested_path}".rstrip("/")
+                if suggested_bucket
+                else "(no suggestion)"
+            )
+
+            print("\n" + "-" * 50)
+            print(f"File: {f.name}")
+            print(f"From: {f}")
+            print(f"Suggested: {suggested_label}")
+
+            for i, k in enumerate(bucket_keys, start=1):
+                print(f"  {i}) {k} ({cfg.buckets[k]})")
+            print("  s) skip file")
+            print("  q) quit run")
+            print("  Enter = accept suggested bucket (if any)")
+
+            chosen_bucket: str | None = None
+
+            while True:
+                choice = input("> ").strip().lower()
+
+                if choice == "q":
+                    print("Quit.")
+                    quit_all = True
+                    break
+
+                if choice == "s":
+                    skipped.append(SkipRecord(path=str(f), reason="user skipped"))
+                    break
+
+                if choice == "":
+                    if not suggested_bucket:
+                        print("No suggestion available. Choose a bucket number, s, or q.")
+                        continue
+                    chosen_bucket = suggested_bucket
+                    break
+
+                if choice.isdigit():
+                    idx = int(choice)
+                    if 1 <= idx <= len(bucket_keys):
+                        chosen_bucket = bucket_keys[idx - 1]
+                        break
+
+                print("Invalid input. Use Enter, 1-9, s, or q.")
+
+            if quit_all:
+                break
+
+            if chosen_bucket is None:
+                continue  # skipped
+
+            bucket_dir = cfg.buckets[chosen_bucket]
+            bucket_root = (cfg.para_root / bucket_dir).resolve()
+            bucket_root.mkdir(parents=True, exist_ok=True)
+
+            # Start browsing inside suggested folder if possible
+            start_dir = bucket_root
+            if rule and chosen_bucket == rule.bucket and rule.path:
+                suggested_dir = (bucket_root / rule.path).resolve()
+                if suggested_dir.exists() and suggested_dir.is_dir():
+                    start_dir = suggested_dir
+
+            try:
+                chosen_dir = pick_folder_interactive(start_dir)
+            except StopIteration:
+                print("Quit.")
+                break
+
+            if chosen_dir is None:
+                skipped.append(SkipRecord(path=str(f), reason="user skipped"))
+                continue
+
+            dst = unique_destination(chosen_dir / f.name)
+            rule_name = rule.name if rule else "guided"
+            confirmed.append(MoveRecord(src=str(f), dst=str(dst), rule=rule_name))
+
+        # Guided dry-run output
+        if args.dry_run:
+            for m in confirmed:
+                print(f"[DRY] {m.rule}: {m.src} -> {m.dst}")
+            print(f"[DRY] would move {len(confirmed)} file(s)")
+            print_unmatched(skipped)
+            return 0
+
+        if not confirmed:
+            print("moved 0 file(s)")
+            print_unmatched(skipped)
+            return 0
+
+        log_path = run_log_path(inbox)
+        with log_path.open("w", encoding="utf-8") as fp:
+            for m in confirmed:
+                shutil.move(m.src, m.dst)
+                write_record(fp, m)
+                print(f"{m.rule}: {m.src} -> {m.dst}")
+
+        set_latest_run(inbox, log_path)
+
+        print(f"moved {len(confirmed)} file(s)")
+        print_unmatched(skipped)
+        print(f"log: {log_path}")
+        return 0
+
+    # -------------------------
+    # Automatic mode
+    # -------------------------
     moves, skipped = sort_inbox(inbox=inbox, cfg=cfg, dry_run=args.dry_run)
 
     if args.dry_run:
@@ -163,6 +361,68 @@ def cmd_sort(args: argparse.Namespace) -> int:
     print(f"log: {log_path}")
     return 0
 
+def guided_plan_for_file(cfg, inbox: Path, file: Path) -> tuple[str, str] | None:
+    sug = suggested_destination(cfg, file)
+    suggested_text = "(no suggestion)"
+    default_bucket = None
+    default_subpath = ""
+
+    if sug:
+        default_bucket, default_subpath = sug
+        suggested_text = f"{default_bucket}/{default_subpath}".rstrip("/")
+
+    print("\n" + "-" * 50)
+    print(f"File: {file.name}")
+    print(f"From: {file}")
+    print(f"Suggested: {suggested_text}")
+
+    order = bucket_menu_order(cfg)
+    for i, k in enumerate(order, start=1):
+        print(f"  {i}) {k} ({cfg.buckets[k]})")
+    print("  s) skip")
+    print("  q) quit")
+
+    while True:
+        choice = input("> ").strip().lower()
+
+        if choice in ("q",):
+            return ("__QUIT__", "")
+
+        if choice in ("s",):
+            return None
+
+        # Enter = accept suggestion (only if exists)
+        if choice == "":
+            if default_bucket is None:
+                print("No suggestion available. Choose a bucket number, s, or q.")
+                continue
+            chosen_bucket = default_bucket
+            subpath_default = default_subpath
+            break
+
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(order):
+                chosen_bucket = order[idx - 1]
+                subpath_default = default_subpath if chosen_bucket == default_bucket else ""
+                break
+
+        print("Invalid input. Use Enter, 1-9, s, or q.")
+
+    subpath = input(f"Subfolder path [{subpath_default}]: ").strip() or subpath_default
+
+    bucket_dir = cfg.buckets[chosen_bucket]
+    dest_dir = (cfg.para_root / bucket_dir / subpath).resolve() if subpath else (cfg.para_root / bucket_dir).resolve()
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    dst = unique_destination(dest_dir / file.name)
+    # For logging, use the suggested rule name if it existed, otherwise "guided"
+    rule_name = "guided"
+    if sug and chosen_bucket == default_bucket and subpath == default_subpath:
+        rule_name = "suggested"
+
+    return (str(dst), rule_name)
+
 
 def cmd_undo(args: argparse.Namespace) -> int:
     inbox = Path(args.inbox).expanduser().resolve()
@@ -187,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("inbox", help="Folder to treat as inbox (e.g. ~/Downloads)")
     ps.add_argument("--config", default=None, help="Path to config YAML (overrides user config)")
     ps.add_argument("--dry-run", action="store_true", help="Show what would happen")
+    ps.add_argument("--guided", action="store_true", help="Prompt for every file; rules are suggestions only")
     ps.set_defaults(func=cmd_sort)
 
     pu = sub.add_parser("undo", help="Undo the last sort run")
