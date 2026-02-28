@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import shutil
 from collections import Counter
+import os
 from pathlib import Path
 
 from .config import load_config
@@ -25,6 +26,7 @@ from .log import run_log_path, set_latest_run, write_record, MoveRecord
 from .sorter import SkipRecord, sort_inbox, pick_rule, unique_destination
 from .undo import undo_last_run
 from .xdg import user_config_path
+from .preview import is_image, chafa_available, show_image_with_chafa
 
 # ---------------------------------------------------------------------------
 # Config templates
@@ -305,6 +307,23 @@ def cmd_sort(args: argparse.Namespace) -> int:
 
         for f in files:
             rule = pick_rule(cfg, f)  # suggestion only
+            # --- Optional chafa preview (guided mode) ---
+            preview_enabled = not args.no_preview
+            if preview_enabled and is_image(f):
+                if chafa_available():
+                    print("\n Preview:\n")
+                    show_image_with_chafa(f, size=args.preview_size)
+                    print()
+                else:
+                    # Print this once per run
+                    if not hasattr(cmd_sort, "_warned_missing_chafa"):
+                        print(
+                            "\n[!] Image preview enabled but 'chafa' is not installed."
+                            "   Install it (Arch: sudo pacman -S chafa\n"
+                            "   Or disable with:    --no-preview\n"
+                        )
+                        setattr(cmd_sort, "_warned_missing_chafa", True)
+
             suggested_bucket = rule.bucket if rule else None
             suggested_path = rule.path if rule else ""
             suggested_label = (
@@ -540,6 +559,8 @@ def build_parser() -> argparse.ArgumentParser:
     ps.add_argument("--config", default=None, help="Path to config YAML (overrides user config)")
     ps.add_argument("--dry-run", action="store_true", help="Show what would happen")
     ps.add_argument("--guided", action="store_true", help="Prompt for every file; rules are suggestions only")
+    ps.add_argument("--no-preview", action="store_true", help="Disable image previews using chafa (guided mode only)")
+    ps.add_argument("--preview-size", default="60x30", help="chafa preview size WxH (default: 60x30)")
     ps.set_defaults(func=cmd_sort)
 
     pu = sub.add_parser("undo", help="Undo the last sort run")
