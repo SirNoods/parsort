@@ -1,12 +1,16 @@
+"""
+parsort.preview
+
+Optional image preview helpers using `chafa`.
+"""
+
 from __future__ import annotations
 
-import os
-import shutil
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
+import shutil
 
-IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "exr"}
+IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
 
 def is_image(path: Path) -> bool:
     return path.suffix.lower().lstrip(".") in IMAGE_EXTS
@@ -14,18 +18,10 @@ def is_image(path: Path) -> bool:
 def chafa_available() -> bool:
     return shutil.which("chafa") is not None
 
-def clear_screen() -> None:
-    os.system("clear")
+def show_image_with_chafa(path: Path, size: str = "60x30") -> None:
+    """
+    Render an image preview using chafa.
 
-@dataclass(frozen=True)
-class ChafaOpts:
-    size: str = "60*30"         # Width x Height
-    symbols: str = "block"      # or "ascii", "unicode"
-    dither: str | None = None   # e.g. "bayer", "none"
-
-def render_with_chafa(path: Path, opts: ChafaOpts) -> None:
-    cmd = ["chafa", f"--size={opts.size}", f"--symbols={opts.symbols}"]
-    if opts.dither:
-        cmd.append(f"--dither={opts.dither}")
-    cmd.append(str(path))
-    subprocess.run(cmd, check=False)
+    `size` format: "WxH" (e.g. "60x30")
+    """
+    subprocess.run(["chafa", f"--size={size}", str(path)], check=False)
