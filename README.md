@@ -107,6 +107,7 @@ parsort sort ~/Downloads --guided
 ```
 in guided mode:
 - every file is shown to you
+- images get a preview if you have chafa installed
 - rules are suggestions only
 - you choose the bucket
 - you browse into the exact subfolder
@@ -121,7 +122,6 @@ parsort undo ~/Downloads --dry-run
 
 ## Roadmap
 Planned features:
-- optional image preview via chafa
 - better rule matching, and more configurable rule options
 - batch confirmation
 - AUR packaging
