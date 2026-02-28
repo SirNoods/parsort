@@ -308,6 +308,7 @@ def cmd_sort(args: argparse.Namespace) -> int:
         for f in files:
             rule = pick_rule(cfg, f)  # suggestion only
             # --- Optional chafa preview (guided mode) ---
+            warned_missing_chafa = False
             preview_enabled = not args.no_preview
             if preview_enabled and is_image(f):
                 if chafa_available():
@@ -316,13 +317,13 @@ def cmd_sort(args: argparse.Namespace) -> int:
                     print()
                 else:
                     # Print this once per run
-                    if not hasattr(cmd_sort, "_warned_missing_chafa"):
+                    if not warned_missing_chafa:
                         print(
-                            "\n[!] Image preview enabled but 'chafa' is not installed."
-                            "   Install it (Arch: sudo pacman -S chafa\n"
-                            "   Or disable with:    --no-preview\n"
+                            "\n[!] Image preview enabled but 'chafa' is not installed.\n"
+                            "    Install it (Arch): sudo pacman -S chafa\n"
+                            "    Or disable with:   --no-preview\n"
                         )
-                        setattr(cmd_sort, "_warned_missing_chafa", True)
+                        warned_missing_chafa = True
 
             suggested_bucket = rule.bucket if rule else None
             suggested_path = rule.path if rule else ""
@@ -345,6 +346,7 @@ def cmd_sort(args: argparse.Namespace) -> int:
 
             chosen_bucket: str | None = None
 
+            accept_suggested_path = False
             while True:
                 choice = input("> ").strip().lower()
 
@@ -362,6 +364,7 @@ def cmd_sort(args: argparse.Namespace) -> int:
                         print("No suggestion available. Choose a bucket number, s, or q.")
                         continue
                     chosen_bucket = suggested_bucket
+                    accept_suggested_path = True
                     break
 
                 if choice.isdigit():
@@ -381,6 +384,18 @@ def cmd_sort(args: argparse.Namespace) -> int:
             bucket_dir = cfg.buckets[chosen_bucket]
             bucket_root = (cfg.para_root / bucket_dir).resolve()
             bucket_root.mkdir(parents=True, exist_ok=True)
+
+            # If user accepted suggested destination via Enter, skip the folder picker and use the suggested subpath (creating it if needed)
+            if accept_suggested_path and rule and chosen_bucket == rule.bucket:
+                dest_dir = bucket_root
+                if rule.path:
+                    dest_dir = (bucket_root / rule.path).resolve()
+                    dest_dir.mkdir(parents=True, exist_ok=True)
+
+                dst = unique_destination(dest_dir / f.name)
+                rule_name = rule.name
+                confirmed.append(MoveRecord(src=str(f), dst=str(dst), rule=rule_name))
+                continue
 
             # Start browsing inside suggested folder if possible
             start_dir = bucket_root
